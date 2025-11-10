@@ -1,0 +1,25 @@
+# Binaries & build outputs
+/bin/
+/build/
+*.exe
+
+# Coverage / profiling
+/coverage.out
+/profile.out
+
+# Editor artefacts
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Environment & secrets
+.env
+.env.*
+/config/local.yaml
+
+# Generated files
+/docs/openapi/*
+/internal/ent/migrate/schema/*
+
+
