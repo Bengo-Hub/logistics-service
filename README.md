@@ -38,6 +38,12 @@ The service binds to `http://localhost:4103` by default (configurable via `LOGIS
 - `internal/ent` – Ent schemas and generated clients.
 - `internal/modules` – fleet, dispatch, tasks, telemetry, billing, integrations.
 - `docs/` – ERD, ADRs, integration playbooks, incident runbooks.
+  - [ERD overview](./docs/erd.md)
+  - [Cross‑service ERD alignment](./docs/erd-alignment.md)
+  - [API contract (OpenAPI)](./docs/api/openapi.yaml)
+  - [Mapping & routing providers](./docs/integrations/mapping-providers.md)
+  - [Threat model](./docs/threat-model.md)
+  - [Sprint 0 progress](./docs/sprints/sprint-0.md)
 
 ## Integrations
 

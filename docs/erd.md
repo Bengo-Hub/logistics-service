@@ -16,7 +16,7 @@ Ent schemas model the domain and power migrations.
 | Table | Key Columns | Description |
 |-------|-------------|-------------|
 | `fleets` | `id`, `tenant_id`, `tenant_slug`, `name`, `type`, `status`, `metadata`, `created_at`, `updated_at` | Fleet grouping (internal riders, third-party carriers) keyed by shared tenant slug. |
-| `fleet_members` | `id`, `tenant_id`, `fleet_id`, `user_id`, `driver_code`, `status`, `vehicle_id`, `joined_at`, `suspended_at`, `metadata` | Rider/driver membership. Links to identities from `auth-service` via `user_id`; onboarding data originates from food-delivery backend using shared tenant/outlet references. |
+| `fleet_members` | `id`, `tenant_id`, `fleet_id`, `user_id`, `driver_code`, `status`, `vehicle_id`, `joined_at`, `suspended_at`, `metadata` | Rider/driver membership. Links to identities from `auth-service` via `user_id`; onboarding flows are initiated from cafe-backend or cafe-frontend, but all rider profiles are owned by logistics-service. |
 | `vehicles` | `id`, `tenant_id`, `fleet_id`, `vehicle_type`, `make`, `model`, `license_plate`, `capacity_json`, `status`, `compliance_status`, `metadata` | Vehicle registry. |
 | `vehicle_documents` | `id`, `vehicle_id`, `document_type`, `file_url`, `issued_at`, `expires_at`, `status`, `verified_by`, `verified_at` | Compliance documents. |
 | `rider_shifts` | `id`, `tenant_id`, `fleet_member_id`, `shift_start`, `shift_end`, `status`, `created_at`, `updated_at` | Shift planning and attendance. |
@@ -106,17 +106,82 @@ Ent schemas model the domain and power migrations.
 ## Relationships & Integrations
 
 - `tasks` are the source for `task_steps`, `task_events`, `task_assignments`, and `proof_of_delivery`.
-- Each `fleet_member` references an identity from `auth-service` (`user_id`) and syncs rider KYC state with the food-delivery backend.
-- `tasks.external_reference` ties back to upstream systems (food delivery orders, inventory transfers, POS tickets) using the shared `tenant_slug` and outlet identifiers to guarantee consistency; tenant/outlet records are hydrated via discovery callbacks before tasks are stored.
+- Each `fleet_member` references an identity from `auth-service` (`user_id`). Rider onboarding/KYC flows are initiated from cafe-backend or cafe-frontend, but all rider profiles, documents, and status transitions are owned by logistics-service.
+- `tasks.external_reference` ties back to upstream systems (cafe orders, inventory transfers, POS tickets) using the shared `tenant_slug` and outlet identifiers to guarantee consistency; tenant/outlet records are hydrated via discovery callbacks before tasks are stored.
 - `transfer_links` unify logistics movement with `inventory-service` transfer orders to avoid duplicated state.
 - `billing_events` and `earnings_statements` integrate with `treasury-app` for payouts and invoicing.
 - Outbound events inform:
-  - Food delivery backend (`logistics.task.assigned`, `logistics.route.completed`).
+  - Cafe backend (`logistics.task.assigned`, `logistics.route.completed`, `logistics.task.created`).
   - Inventory service (`logistics.transfer.shipped`).
   - Notifications service (`logistics.driver.arriving`, `logistics.sla.breach`).
   - POS service (curbside pickup readiness).
 - Tenant/outlet discovery is captured in `tenant_sync_events`, providing a webhook-driven handshake that avoids polling and ensures metadata consistency before tasks are stored.
 - Telemetry alerts can trigger notifications or dispatcher dashboards in near real time.
+
+## Cross-Service Entity Alignment
+
+This section defines how Logistics Service entities relate to other services to prevent duplication and ensure consistent data ownership. For the complete cross-service entity ownership matrix, see `docs/cross-service-entity-ownership.md`.
+
+### Core Entity Ownership Rules
+
+| Entity Type | Owner Service | Logistics Reference | Notes |
+|-------------|--------------|-------------------|-------|
+| **Users/Identities** | `auth-service` | `fleet_members.user_id` (UUID) | Auth service is the single source of truth for user accounts, roles, and SSO tokens. Logistics only stores `user_id` references. |
+| **Tenants/Organizations** | `auth-service` | `tenant_id`, `tenant_slug` (via `tenant_sync_events`) | Tenant metadata is managed by auth-service. Logistics receives tenant/outlet discovery webhooks to hydrate metadata before persisting tasks or fleet members. |
+| **Outlets/Branches/Warehouses** | `inventory-service` (warehouses), `auth-service` (outlets) | `outlet_id` in `task_steps`, `warehouse_id` in `waste_pickups` | Inventory owns warehouse definitions; auth-service owns outlet registry. Logistics references these via IDs, never duplicates. |
+| **Items/SKUs** | `inventory-service` | `item_ref` or `sku` in `task_metadata` (JSON) | Inventory is the system of record for items, variants, and stock. Logistics only stores SKU references in task metadata for manifest purposes. |
+| **Inventory Transfers** | `inventory-service` | `transfer_links.inventory_transfer_id` | Inventory owns transfer orders. Logistics creates tasks linked via `transfer_links` to avoid duplicating transfer state. |
+| **Orders** | `cafe-backend` (cafe/delivery orders), `pos-service` (POS orders) | `tasks.external_reference` | Upstream services own orders. Logistics creates tasks with `external_reference` pointing to the source order ID. |
+| **Financial Transactions** | `treasury-app` | `billing_events` (exported), `earnings_statements` (exported) | Treasury owns ledger, invoices, expenses, bills. Logistics emits billing events and earnings statements to treasury via webhooks/events. |
+| **Fleets/Drivers/Vehicles** | `logistics-service` | `fleets`, `fleet_members`, `vehicles` | **Logistics owns** fleet management, driver assignments, and vehicle registry. Other services reference via `fleet_member_id` or `fleet_id` when needed. |
+| **Tasks/Routes** | `logistics-service` | `tasks`, `routes`, `task_steps` | **Logistics owns** all delivery tasks, route planning, and dispatch. Other services create tasks via API or webhooks. |
+| **Telemetry/Location** | `logistics-service` | `telemetry_streams`, `telemetry_points` | **Logistics owns** real-time location tracking and driver behavior analytics. Other services consume via events/APIs. |
+| **Proof of Delivery** | `logistics-service` | `proof_of_delivery` | **Logistics owns** PoD artifacts (signatures, photos, OTP codes). Other services receive PoD events via webhooks. |
+
+### Integration Patterns
+
+#### 1. Tenant/Outlet Discovery (No Duplication)
+- **Source**: `auth-service` emits tenant/outlet discovery webhooks when new tenants/outlets are created.
+- **Logistics Action**: Receives webhook → stores in `tenant_sync_events` → uses metadata to validate `tenant_id`/`tenant_slug` before creating tasks or fleet members.
+- **Rule**: Logistics **never** creates tenant or outlet records. It only references them via IDs.
+
+#### 2. User/Driver Identity (Reference Only)
+- **Source**: `auth-service` manages all user accounts, roles, and authentication.
+- **Logistics Action**: When creating `fleet_members`, use `user_id` from auth-service. Optionally sync driver profile metadata via discovery webhooks.
+- **Rule**: Logistics **never** duplicates user tables. It only stores `user_id` references and driver-specific metadata (e.g., `driver_code`, `vehicle_id`).
+
+#### 3. Inventory Transfers (Link, Don't Duplicate)
+- **Source**: `inventory-service` creates `inventory_transfers` when stock needs to move between warehouses.
+- **Logistics Action**: Inventory emits `inventory.transfer.created` webhook → Logistics creates a `task` with `task_type='transfer'` → Links via `transfer_links.inventory_transfer_id`.
+- **Rule**: Logistics **never** duplicates transfer orders. It creates tasks that reference inventory transfer IDs.
+
+#### 4. Zone/Branch Dispatch (Query, Don't Store)
+- **Source**: `inventory-service` exposes availability API: `GET /v1/{tenant}/inventory/availability?zone={z}&branch={b}&sku={s}`
+- **Logistics Action**: Before creating routes, query inventory to find nearest in-stock locations. Use dispatch preferences API to avoid cross-zone shipments.
+- **Rule**: Logistics **never** stores inventory balances. It queries inventory service in real-time for availability.
+
+#### 5. Financial Events (Export, Don't Own)
+- **Source**: `logistics-service` generates billing events (payouts, surcharges, expenses) and earnings statements.
+- **Treasury Action**: Receives `billing_events` via webhooks → posts to ledger, creates invoices, processes payouts.
+- **Rule**: Logistics **never** manages financial ledgers or invoices. It exports events to treasury, which owns all financial state.
+
+### ID & Reference Conventions
+
+- **All upstream requests to Logistics MUST include `tenant_id` and `tenant_slug`** for multi-tenancy isolation.
+- **For itemized movements**, include `sku` and `quantity` in `task_metadata` (JSON). Do not create item records.
+- **For inter-branch transfers**, include `from_branch_id`, `to_branch_id` mapped to Inventory warehouse IDs. Do not duplicate warehouse definitions.
+- **For driver/rider references**, use `user_id` from auth-service. Do not create user accounts in Logistics.
+- **For order references**, use `external_reference` in tasks pointing to the source order ID (cafe-backend or POS). Do not duplicate order tables.
+
+### Zone & Dispatch Collaboration
+
+- **Inventory Service** exposes:
+  - `GET /v1/{tenant}/inventory/availability?zone={z}&branch={b}&sku={s}` → Returns nearest in-stock locations with priorities/ETAs.
+  - `GET /v1/{tenant}/policies/dispatch-preferences` → Returns rules to avoid cross-zone shipping when local stock exists.
+- **Logistics Service** uses the above to:
+  - Build route plans that prefer local stock and minimize cost/ETA.
+  - Avoid inter-zone shipments when inventory indicates local availability.
+  - Query inventory in real-time during dispatch, never caching stock levels locally.
 
 ## Seed & Reference Data
 
