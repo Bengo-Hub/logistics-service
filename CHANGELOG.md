@@ -10,6 +10,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Sem
 - Standardized Swagger documentation path to `/v1/docs` (previously `/swagger/*`)
 - Updated OpenAPI specification servers to use HTTPS URLs for local development
 - Updated Swagger specifications to support both HTTP and HTTPS schemes
+- Replaced `http-swagger` with custom Swagger handler that embeds OpenAPI spec and provides protocol-aware URL detection for HTTPS compatibility
+- Swagger UI now displays standard header with Explore button and URL input field
 
 ### Added
 - Authored service delivery plan (`plan.md`) covering scope, architecture, and roadmap.
